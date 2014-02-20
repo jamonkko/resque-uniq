@@ -4,6 +4,10 @@ module Resque
       LOCK_NAME_PREFIX = 'lock'
       RUN_LOCK_NAME_PREFIX = 'running_'
 
+      class Helpers
+        include Resque::Helpers
+      end
+
       def lock(*args)
         "#{LOCK_NAME_PREFIX}:#{name}-#{obj_to_string(args)}"
       end
@@ -29,7 +33,7 @@ module Resque
         Resque.working.map {|w| w.job }.map do |item|
           begin
             payload = item['payload']
-            klass = Resque::Job.constantize(payload['class'])
+            klass = Helpers.new.constantize(payload['class'])
             args = payload['args']
             return false if rlock == klass.run_lock(*args)
           rescue NameError

@@ -9,6 +9,14 @@ class UniqueJobTest < Test::Unit::TestCase
     def self.perform(param) ; end
   end
 
+  class RepeaterJob
+    extend Resque::Plugins::UniqueJob
+    @queue = :job_test
+    def self.perform(param)
+      Resque.enqueue(RepeaterJob, "hello")
+    end
+  end
+
   class AutoexpireLockJob
     extend Resque::Plugins::UniqueJob
     @queue = :job_test
@@ -65,6 +73,20 @@ class UniqueJobTest < Test::Unit::TestCase
 
     Resque.enqueue(Job, "hello")
     assert_equal 1, Resque.size(queue)
+  end
+
+
+  def test_stale_locks_are_not_cleared_if_worker_still_working
+    queue = Resque.queue_from_class(RepeaterJob)
+    Resque.enqueue(RepeaterJob, "hello")
+    assert_equal 1, Resque.size(queue)
+
+    worker = Resque::Worker.new(queue)
+    job = worker.reserve
+    worker.register_worker
+    worker.working_on job
+    worker.perform(job)
+    assert_equal 0, Resque.size(queue), "Expected queue to be empty"
   end
 
   # XXX Resque doesn't call any job hooks in Resque#remove_queue. We don't get a chance to clean up the locks
