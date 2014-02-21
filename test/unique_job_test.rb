@@ -34,7 +34,9 @@ class UniqueJobTest < Test::Unit::TestCase
   class ExtendedAutoExpireLockJob < AutoexpireLockJobBase ; end
 
   def setup
-    Resque.redis.flushdb
+    Resque.logger.level = Logger::WARN
+    Resque.redis = {}
+    Resque.backend.store.flushdb
   end
 
   def test_no_more_than_one_job_instance
@@ -52,9 +54,9 @@ class UniqueJobTest < Test::Unit::TestCase
     Resque.enqueue(Job, "hello")
     assert_equal 1, Resque.size(queue)
 
-    worker = Resque::Worker.new(queue)
-    job = worker.reserve
-    worker.perform(job)
+    worker = Resque::Worker.new(queue, {interval: 0})
+    worker.work
+
     assert_equal 0, Resque.size(queue)
 
     Resque.enqueue(Job, "hello")
@@ -68,8 +70,8 @@ class UniqueJobTest < Test::Unit::TestCase
 
     Resque.dequeue(Job, "hello")
     assert_equal 0, Resque.size(queue)
-    assert_equal nil, Resque.redis.get(Job.lock("hello"))
-    assert_equal nil, Resque.redis.get(Job.run_lock("hello"))
+    assert_equal nil, Resque.backend.store.get(Job.lock("hello"))
+    assert_equal nil, Resque.backend.store.get(Job.run_lock("hello"))
 
     Resque.enqueue(Job, "hello")
     assert_equal 1, Resque.size(queue)
@@ -81,11 +83,8 @@ class UniqueJobTest < Test::Unit::TestCase
     Resque.enqueue(RepeaterJob, "hello")
     assert_equal 1, Resque.size(queue)
 
-    worker = Resque::Worker.new(queue)
-    job = worker.reserve
-    worker.register_worker
-    worker.working_on job
-    worker.perform(job)
+    worker = Resque::Worker.new(queue, {interval: 0})
+    job = worker.work
     assert_equal 0, Resque.size(queue), "Expected queue to be empty"
   end
 
@@ -96,8 +95,8 @@ class UniqueJobTest < Test::Unit::TestCase
   #   assert_equal 1, Resque.size(queue)
 
   #   Resque.remove_queue(queue)
-  #   assert_equal nil, Resque.redis.get(Job.lock("hello"))
-  #   assert_equal nil, Resque.redis.get(Job.run_lock("hello"))
+  #   assert_equal nil, Resque.backend.store.get(Job.lock("hello"))
+  #   assert_equal nil, Resque.backend.store.get(Job.run_lock("hello"))
   # end
 
   def test_autoexpire_lock
@@ -115,7 +114,7 @@ class UniqueJobTest < Test::Unit::TestCase
   end
 
   def test_cleans_up_old_lock_during_enqueue
-    Resque.redis.set(AutoexpireLockJob.lock(123), Time.now.to_i - 100)
+    Resque.backend.store.set(AutoexpireLockJob.lock(123), Time.now.to_i - 100)
     Resque.enqueue(AutoexpireLockJob, 123)
     assert_equal 1, Resque.size(Resque.queue_from_class(AutoexpireLockJob))
   end

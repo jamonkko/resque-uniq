@@ -4,10 +4,6 @@ module Resque
       LOCK_NAME_PREFIX = 'lock'
       RUN_LOCK_NAME_PREFIX = 'running_'
 
-      class Helpers
-        include Resque::Helpers
-      end
-
       def lock(*args)
         "#{LOCK_NAME_PREFIX}:#{name}-#{obj_to_string(args)}"
       end
@@ -30,10 +26,10 @@ module Resque
         rlock = run_lock_from_lock(lock)
         return false unless get_lock(rlock)
 
-        Resque.working.map {|w| w.job }.map do |item|
+        Resque::WorkerRegistry.working.map {|w| w.worker_registry.job }.map do |item|
           begin
             payload = item['payload']
-            klass = Helpers.new.constantize(payload['class'])
+            klass = payload['class'].to_s.constantize
             args = payload['args']
             return false if rlock == klass.run_lock(*args)
           rescue NameError
@@ -48,10 +44,10 @@ module Resque
       end
 
       def get_lock(lock)
-        lock_value = Resque.redis.get(lock)
+        lock_value = Resque.backend.store.get(lock)
         set_time = lock_value.to_i
         if ttl && lock_value && (set_time < Time.now.to_i - ttl)
-          Resque.redis.del(lock)
+          Resque.backend.store.del(lock)
           nil
         else
           lock_value
@@ -61,13 +57,13 @@ module Resque
       def before_enqueue_lock(*args)
         lock_name = lock(*args)
         if stale_lock? lock_name
-          Resque.redis.del lock_name
-          Resque.redis.del run_lock_from_lock(lock_name)
+          Resque.backend.store.del lock_name
+          Resque.backend.store.del run_lock_from_lock(lock_name)
         end
-        not_exist = Resque.redis.setnx(lock_name, Time.now.to_i)
+        not_exist = Resque.backend.store.setnx(lock_name, Time.now.to_i)
         if not_exist
           if ttl && ttl > 0
-            Resque.redis.expire(lock_name, ttl)
+            Resque.backend.store.expire(lock_name, ttl)
           end
         end
         not_exist
@@ -78,19 +74,19 @@ module Resque
         jlock = lock(*args)
 
         rlock = run_lock(*args)
-        Resque.redis.set(rlock, Time.now.to_i)
+        Resque.backend.store.set(rlock, Time.now.to_i)
 
         begin
           yield
         ensure
-          Resque.redis.del(rlock)
-          Resque.redis.del(jlock)
+          Resque.backend.store.del(rlock)
+          Resque.backend.store.del(jlock)
         end
       end
 
       def after_dequeue_lock(*args)
-        Resque.redis.del(run_lock(*args))
-        Resque.redis.del(lock(*args))
+        Resque.backend.store.del(run_lock(*args))
+        Resque.backend.store.del(lock(*args))
       end
 
       private
