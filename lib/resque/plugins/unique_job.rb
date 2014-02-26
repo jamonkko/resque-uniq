@@ -44,29 +44,49 @@ module Resque
       end
 
       def get_lock(lock)
-        lock_value = Resque.redis.get(lock)
-        set_time = lock_value.to_i
-        if ttl && lock_value && (set_time < Time.now.to_i - ttl)
-          Resque.redis.del(lock)
-          nil
+        if not ttl
+          Resque.redis.get(lock)
         else
-          lock_value
+          # Manually clean expired locks atomically to make sure value has not changed between get and delete
+          script = <<-LUA
+            local set_time = tonumber(redis.call('GET', KEYS[1]));
+            if (set_time and set_time < tonumber(ARGV[1])) then
+              redis.call('DEL', KEYS[1]);
+              return 0;
+            else
+              return set_time;
+            end
+          LUA
+          result = Resque.redis.eval(script, :keys => [lock], :argv => [Time.now.to_i - ttl])
+          return nil if (result == 0)
+          result
         end
       end
 
       def before_enqueue_lock(*args)
         lock_name = lock(*args)
+        got_lock = false
         if stale_lock? lock_name
-          Resque.redis.del lock_name
-          Resque.redis.del run_lock_from_lock(lock_name)
+          # Steal stale lock atomically to make sure that only the first process detecting stale lock will do it.
+          script = <<-LUA
+            local lock_value = redis.call('GET', KEYS[1]);
+            if (lock_value) then
+              redis.call('DEL', KEYS[2]);
+              redis.call('SET', KEYS[1], ARGV[1]);
+              return 1;
+            else
+              return 0;
+            end
+          LUA
+          result = Resque.redis.eval(script, :keys => [lock, rlock], :argv => [Time.now.to_i])
+          got_lock = (result == 1)
+        else
+          got_lock = Resque.redis.setnx(lock_name, Time.now.to_i)
         end
-        not_exist = Resque.redis.setnx(lock_name, Time.now.to_i)
-        if not_exist
-          if ttl && ttl > 0
-            Resque.redis.expire(lock_name, ttl)
-          end
+        if got_lock and ttl && ttl > 0
+          Resque.redis.expire(lock_name, ttl)
         end
-        not_exist
+        got_lock
       end
 
       def around_perform_lock(*args)
