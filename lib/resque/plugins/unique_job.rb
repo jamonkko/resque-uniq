@@ -24,23 +24,24 @@ module Resque
         rlock.sub(/^#{RUN_LOCK_NAME_PREFIX}/, '')
       end
 
-      def stale_lock?(lock)
-        return false unless get_lock(lock)
+      def get_stale_lock(lock)
+        stale_value = get_lock(lock)
+        return nil unless stale_value
 
         rlock = run_lock_from_lock(lock)
-        return false unless get_lock(rlock)
+        return nil unless get_lock(rlock)
 
         Resque.working.map {|w| w.job }.map do |item|
           begin
             payload = item['payload']
             klass = Helpers.new.constantize(payload['class'])
             args = payload['args']
-            return false if rlock == klass.run_lock(*args)
+            return nil if rlock == klass.run_lock(*args)
           rescue NameError
             # unknown job class, ignore
           end
         end
-        true
+        stale_value
       end
 
       def ttl
@@ -61,35 +62,28 @@ module Resque
               return set_time;
             end
           LUA
-          result = Resque.redis.eval(script, :keys => [lock], :argv => [Time.now.to_i - ttl])
-          return nil if (result == 0)
-          result
+          result = Resque.redis.eval(script, :keys => [lock], :argv => [Time.now.to_i - ttl]).to_i
+          if (result == 0)
+            nil
+          else
+            result
+          end
         end
       end
 
       def before_enqueue_lock(*args)
-        lock_name = lock(*args)
-        got_lock = false
-        if stale_lock? lock_name
-          # Steal stale lock atomically to make sure that only the first process detecting stale lock will do it.
-          script = <<-LUA
-            local lock_value = redis.call('GET', KEYS[1]);
-            if (lock_value) then
-              redis.call('DEL', KEYS[2]);
-              redis.call('SET', KEYS[1], ARGV[1]);
-              return 1;
-            else
-              return 0;
-            end
-          LUA
-          result = Resque.redis.eval(script, :keys => [lock, rlock], :argv => [Time.now.to_i])
-          got_lock = (result == 1)
-        else
-          got_lock = Resque.redis.setnx(lock_name, Time.now.to_i)
+        lock = lock(*args)
+
+        stale_value = get_stale_lock(lock)
+        if stale_value
+          got_lock = reset_stale_lock(lock, stale_value)
         end
+
+        got_lock ||= Resque.redis.setnx(lock, new_value(stale_value))
         if got_lock and ttl && ttl > 0
-          Resque.redis.expire(lock_name, ttl)
+          Resque.redis.expire(lock, ttl)
         end
+
         got_lock
       end
 
@@ -114,6 +108,34 @@ module Resque
       end
 
       private
+
+      def reset_stale_lock(lock, stale_value)
+        # Steal stale lock atomically to make sure that only the first process detecting stale lock will do it.
+        # Only delete and get the lock if it still exists with the old stale value, otherwise someone else took it already.
+        script = <<-LUA
+          local current_value = redis.call('GET', KEYS[1]);
+          if (tonumber(current_value) == tonumber(ARGV[2])) then
+            redis.call('DEL', KEYS[2]);
+            redis.call('SET', KEYS[1], ARGV[1]);
+            return 1;
+          else
+            return 0;
+          end
+        LUA
+        new_value = new_value(stale_value)
+        result = Resque.redis.eval(script, :keys => [lock, run_lock_from_lock(lock)], :argv => [new_value, stale_value])
+        result.to_i == 1
+      end
+
+      # return new value and make sure it is not the same as old value
+      def new_value(old_value)
+        val = Time.now.to_i
+        if val == old_value
+          val + 1
+        else
+          val
+        end
+      end
 
       def obj_to_string(obj)
         case obj
