@@ -1,6 +1,8 @@
 # resque-uniq
 
-A Resque plugin to ensure only one job instance is queued or running at a time
+A Resque plugin to ensure only one job instance is queued or running at a time.
+
+Requires Redis 2.6 or newer.
 
 ## Installation
 
@@ -85,6 +87,8 @@ name instead
         ...
       end
     end
+
+_resque-uniq_ requires Redis 2.6 (or newer) because it uses [Lua scripting](http://redis.io/commands/EVAL "Lua scripting") for some atomic operations.
 
 ## Credits
 
