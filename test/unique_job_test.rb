@@ -1,4 +1,5 @@
 require 'test/unit'
+require 'mocha/test_unit'
 require 'resque'
 require 'resque/plugins/unique_job'
 
@@ -34,6 +35,7 @@ class UniqueJobTest < Test::Unit::TestCase
   class ExtendedAutoExpireLockJob < AutoexpireLockJobBase ; end
 
   def setup
+    Job.unstub(:get_stale_lock)
     Resque.redis.flushdb
   end
 
@@ -75,7 +77,6 @@ class UniqueJobTest < Test::Unit::TestCase
     assert_equal 1, Resque.size(queue)
   end
 
-
   def test_stale_locks_are_not_cleared_if_worker_still_working
     queue = Resque.queue_from_class(RepeaterJob)
     Resque.enqueue(RepeaterJob, "hello")
@@ -87,6 +88,37 @@ class UniqueJobTest < Test::Unit::TestCase
     worker.working_on job
     worker.perform(job)
     assert_equal 0, Resque.size(queue), "Expected queue to be empty"
+  end
+
+  def test_stale_locks_are_cleared_if_no_worker_is_working
+    queue = Resque.queue_from_class(Job)
+    lock = Job.lock("hello")
+    rlock = Job.run_lock("hello")
+    Resque.redis.set(lock, Time.now.to_i)
+    Resque.redis.set(rlock, Time.now.to_i)
+    assert_equal 0, Resque.size(queue)
+
+    Resque.enqueue(Job, "hello")
+    assert_equal 1, Resque.size(queue)
+  end
+
+  def test_other_process_deletes_stale_lock_before_us
+    queue = Resque.queue_from_class(Job)
+    lock = Job.lock("hello")
+    rlock = Job.run_lock("hello")
+    stale_time = Time.now.to_i
+    Resque.redis.set(lock, stale_time)
+    Resque.redis.set(rlock, stale_time)
+
+    # Fake other process deleting (and setting) lock after we detect stale lock, but before we delete it
+    delete_locks = Proc.new do
+      Resque.redis.set(lock, stale_time + 10)
+    end
+    Job.stubs(:get_stale_lock).with(&delete_locks).returns(stale_time)
+    Resque.enqueue(Job, "hello")
+
+    # Our job should not be enqueued, the fake job has the lock
+    assert_equal 0, Resque.size(queue)
   end
 
   # XXX Resque doesn't call any job hooks in Resque#remove_queue. We don't get a chance to clean up the locks
